@@ -33,4 +33,5 @@ if [ -f .husky/commit-msg ]; then
   chmod +x .husky/commit-msg || true
 fi
 
+
 echo "완료: Husky 전용 설정이 적용되었습니다. 기존 훅 파일은 그대로 유지되었습니다."
