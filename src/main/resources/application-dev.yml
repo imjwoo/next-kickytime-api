@@ -1,8 +1,15 @@
 spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # ⬅️ 여기에 dev User Pool 기준 issuer-uri '반드시' 지정
+          issuer-uri: https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_xI18xw5er
+
   datasource:
-    url: ${DB_URL}
-    username: ${DB_USERNAME}
-    password: ${DB_PASSWORD}
+    url: jdbc:postgresql://ep-divine-lake-a1vky427-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+    username: neondb_owner
+    password: npg_7ijXVFQrbMn3
     driver-class-name: org.postgresql.Driver
 
   jpa:
@@ -13,6 +20,12 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
     show-sql: true
 
+# Cognito(dev) — dev UserPool/도메인 값
 app:
+  cognito:
+    region: ap-northeast-2
+    user-pool-id: ap-northeast-2_xI18xw5er
+    client-id: 6l5ovdmof4vc5r2socegk41gt4
+    user-info-uri: https://ap-northeast-2xi18xw5er.auth.ap-northeast-2.amazoncognito.com/oauth2/userInfo
   cors:
     allowed-origins: "http://localhost:5173"
