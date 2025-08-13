@@ -1,0 +1,103 @@
+name: Deploy to ECS
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ecs-deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: jeongwoo-repo            # ECR 리포 이름
+  ECS_CLUSTER: kick-cluster                # ECS 클러스터 이름
+  ECS_SERVICE: jeongwoo-tk-service         # ECS 서비스 이름
+  TASK_FAMILY: jeongwoo-tk                 # 태스크 정의 패밀리 이름 (예: jeongwoo-tk)
+  CONTAINER_NAME: jeongwoo-ecr2            # 태스크 정의 안의 컨테이너 이름(정확히!)
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # (OIDC 롤 사용 시 필요)
+
+    steps:
+      - name: Checkout
+      - uses: actions/checkout@v4
+
+      # AWS 자격 설정
+      # ➜ 현재는 액세스키 기반 예시. OIDC 롤을 쓰면 아래 with 부분을 role-to-assume로 바꾸면 됨.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag and push image
+        id: build-image
+        run: |
+          set -e
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          IMAGE_URI="$REGISTRY/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+          # latest 태그도 함께 관리하고 싶다면 주석 해제
+          docker tag "$IMAGE_URI" "$REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+          docker push "$REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Register new task definition (patch image)
+        id: register-td
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.IMAGE_URI }}
+        run: |
+          set -e
+
+          # 기존 태스크 정의를 가져와 이미지 한 줄만 교체
+          aws ecs describe-task-definition \
+            --task-definition "${{ env.TASK_FAMILY }}" \
+            --query 'taskDefinition' > td.json
+
+          # 컨테이너 이름이 정확히 일치해야 함
+          jq --arg NAME "${{ env.CONTAINER_NAME }}" --arg IMG "$IMAGE_URI" '
+            .containerDefinitions |= map(if .name == $NAME then .image = $IMG else . end)
+            | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)
+          ' td.json > td-new.json
+
+          NEW_TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://td-new.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          echo "TASK_DEF_ARN=$NEW_TD_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy service (force new deployment; rolling, zero-downtime)
+        run: |
+          aws ecs update-service \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --service "${{ env.ECS_SERVICE }}" \
+            --task-definition "${{ steps.register-td.outputs.TASK_DEF_ARN }}" \
+            --force-new-deployment
+
+          # 새 리비전이 안정화될 때까지 블록
+          aws ecs wait services-stable \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --services "${{ env.ECS_SERVICE }}"
+
+      - name: Done
+        run: |
+          echo "Deployed image: ${{ steps.build-image.outputs.IMAGE_URI }}"
+          echo "Cluster: ${{ env.ECS_CLUSTER }}"
+          echo "Service: ${{ env.ECS_SERVICE }}"
